@@ -11,21 +11,25 @@ from datasets import Dataset
 from transformers.trainer_utils import get_last_checkpoint
 from trl import GRPOConfig, GRPOTrainer
 
+import bfcl_data
 from eval_v3 import EVAL_DIR, extract_answer, reward
 from grpo_cipher import make_puzzle
+from rewards import REWARDS
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "unsloth/Qwen2.5-1.5B-Instruct")
 
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument("--task", default="bfcl", choices=["bfcl", "cipher"])
+    p.add_argument("--reward", default="partial", choices=list(REWARDS))
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--puzzles", type=int, default=2000)
     p.add_argument("--group", type=int, default=8)
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--grad-accum", type=int, default=1)
-    p.add_argument("--max-seq", type=int, default=1024)
-    p.add_argument("--max-prompt", type=int, default=512)
+    p.add_argument("--max-seq", type=int, default=4096)
+    p.add_argument("--max-prompt", type=int, default=2048)
     p.add_argument("--max-new", type=int, default=256)
     p.add_argument("--lr", type=float, default=5e-6)
     p.add_argument("--beta", type=float, default=0.04)
@@ -36,7 +40,7 @@ def parse_args():
     p.add_argument("--gpu-mem", type=float, default=0.6)
     p.add_argument("--save-every", type=int, default=50)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--out", default=f"{EVAL_DIR}/grpo_unsloth_run1")
+    p.add_argument("--out", default=None)
     return p.parse_args()
 
 
@@ -66,8 +70,16 @@ def make_reward_fn(log_path):
     return cipher_reward
 
 
+def build_bfcl_dataset(tokenizer, max_prompt):
+    ds = bfcl_data.load_split("train")
+    fits = ds.filter(lambda r: len(tokenizer.apply_chat_template(r["prompt"], add_generation_prompt=True)) <= max_prompt)
+    print(f"bfcl train rows: {len(fits)}/{len(ds)} fit in {max_prompt} prompt tokens", flush=True)
+    return fits.shuffle(seed=0)
+
+
 def main():
     args = parse_args()
+    args.out = args.out or f"{EVAL_DIR}/grpo_unsloth_{args.task}" + (f"_{args.reward}" if args.task == "bfcl" else "")
     os.makedirs(args.out, exist_ok=True)
     with open(f"{args.out}/config.json", "w") as f:
         json.dump({**vars(args), "model": MODEL_NAME}, f, indent=2)
@@ -88,6 +100,11 @@ def main():
         use_gradient_checkpointing="unsloth",
         random_state=args.seed,
     )
+
+    if args.task == "bfcl":
+        dataset, make_reward = build_bfcl_dataset(tokenizer, args.max_prompt), REWARDS[args.reward]
+    else:
+        dataset, make_reward = build_dataset(args.puzzles, args.seed), make_reward_fn
 
     config = GRPOConfig(
         output_dir=args.out,
@@ -113,9 +130,9 @@ def main():
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
-        reward_funcs=[make_reward_fn(f"{args.out}/completions.jsonl")],
+        reward_funcs=[make_reward(f"{args.out}/completions.jsonl")],
         args=config,
-        train_dataset=build_dataset(args.puzzles, args.seed),
+        train_dataset=dataset,
     )
     trainer.train(resume_from_checkpoint=get_last_checkpoint(args.out))
     model.save_pretrained(f"{args.out}/lora_final")
