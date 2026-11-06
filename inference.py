@@ -14,16 +14,18 @@ def load():
     return tokenizer, model
 
 
-def generate(tokenizer, model, prompt, max_new_tokens=64, thinking=False):
+def generate(tokenizer, model, prompt, system_prompt, max_new_tokens=512, thinking=False, temperature=0.8):
     text = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
+        [{"role": "system" , "content": system_prompt} ,{"role": "user", "content": prompt}],
         tokenize=False,
         add_generation_prompt=True,
         enable_thinking=thinking,
     )
-    inputs = tokenizer(text, return_tensors="pt").to(DEVICE)
+    if thinking and not text.rstrip().endswith("<think>"):
+        text += "<think>"
+    inputs = tokenizer(text, return_tensors="pt", add_special_tokens=False).to(model.device)
     with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True, temperature=temperature)
     raw = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
     reasoning, sep, answer = raw.rpartition("</think>")
     if not sep:
